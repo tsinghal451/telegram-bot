@@ -4,21 +4,19 @@ import json
 from telegram import Bot
 from werkzeug.utils import secure_filename
 import os
+from threading import Thread
 
-# Allowed file extensions
+# Your bot token and channel username will be provided by the user.
 ALLOWED_EXTENSIONS = {'json'}
-
-# Function to check allowed file extensions
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+stop_flag = False  # Global flag to control the process
+sending_task = None  # Store the current sending task
 
 app = Flask(__name__)
-
-# Configure upload folder
 app.config['UPLOAD_FOLDER'] = 'uploads/'
-
-# Ensure upload folder exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 @app.route('/')
 def index():
@@ -26,57 +24,61 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    # Get bot token and channel username from the form
-    bot_token = request.form['bot_token']
-    channel_username = request.form['channel_username']
+    global stop_flag, sending_task
+    stop_flag = False  # Reset stop flag when a new process starts
 
-    # Check if the request has the file part
-    if 'file' not in request.files:
-        return jsonify({'message': 'No file part'}), 400
+    bot_token = request.form.get('bot_token')
+    channel_username = request.form.get('channel_username')
 
-    file = request.files['file']
+    if not bot_token or not channel_username:
+        return jsonify({'message': 'Bot Token and Channel Username are required!'}), 400
 
-    # If no file is selected
-    if file.filename == '':
-        return jsonify({'message': 'No selected file'}), 400
+    file = request.files.get('file')
+    if not file or file.filename == '':
+        return jsonify({'message': 'No file selected or file missing!'}), 400
 
-    # If the file is allowed, process it
-    if file and allowed_file(file.filename):
+    if allowed_file(file.filename):
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(file_path)
 
-        # Read the JSON data
         with open(file_path, 'r') as f:
             polls = json.load(f)
 
-        # Send the polls to the Telegram channel
-        asyncio.run(send_multiple_polls(bot_token, channel_username, polls))
+        # Run the task in a separate thread to allow real-time control
+        sending_task = Thread(target=lambda: asyncio.run(send_multiple_polls(bot_token, channel_username, polls)))
+        sending_task.start()
 
-        return jsonify({'message': 'Polls sent successfully!'})
+        return jsonify({'message': 'Polls upload started!'})
 
     return jsonify({'message': 'Invalid file format. Please upload a JSON file.'}), 400
 
+@app.route('/stop', methods=['POST'])
+def stop_process():
+    global stop_flag
+    stop_flag = True  # Set the stop flag to True to stop the process
+    return jsonify({'message': 'Poll sending process has been stopped!'})
+
 async def send_multiple_polls(bot_token, channel_username, polls):
-    # Initialize the bot
+    global stop_flag
     bot = Bot(token=bot_token)
 
-    # Loop through each poll
     for poll in polls:
-        # Send the anonymous poll
+        if stop_flag:  # Check if the process should stop
+            print("Poll sending stopped by user.")
+            break
+
         await bot.send_poll(
             chat_id=channel_username,
             question=poll["question"],
             options=poll["options"],
-            is_anonymous=True,  # Keep it anonymous
-            type="quiz",  # Quiz type poll
-            correct_option_id=poll["correct_option_id"],  # Correct answer
-            explanation=poll["explanation"]  # Explanation for wrong answers
+            is_anonymous=True,
+            type="quiz",
+            correct_option_id=poll["correct_option_id"],
+            explanation=poll["explanation"]
         )
         print(f"Poll sent: {poll['question']}")
-
-        # Wait for a specified time before sending the next poll
-        await asyncio.sleep(15)  # Adjust the time as needed for voting
+        await asyncio.sleep(15)
 
 if __name__ == '__main__':
     app.run(debug=True)
